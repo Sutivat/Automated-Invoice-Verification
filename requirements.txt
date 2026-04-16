@@ -1,1 +1,6 @@
-pip install typhoon-ocr
+streamlit
+pandas
+requests
+typhoon-ocr
+openai
+python-dotenv
