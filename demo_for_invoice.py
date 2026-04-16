@@ -1,139 +1,220 @@
-from typhoon_ocr import ocr_document
-import requests
-import os
+import streamlit as st
+import pandas as pd
 import json
+import requests
 import re
-import matplotlib.pyplot as plt
-from pdf2image import convert_from_path
+import os
+import time
+import tempfile
+from typhoon_ocr import ocr_document
+from openai import OpenAI
+from dotenv import load_dotenv
 
-# --- Configuration ---
-llm_api = "http://localhost:11434/v1"
-ocr_model = "scb10x/typhoon-ocr1.5-3b"
-llm_structure_model = "scb10x/typhoon2.5-qwen3-4b"
+load_dotenv()
 
-# --- Mock Database (จำลองฐานข้อมูล Mango Anywhere/ERP) ---
+# ==========================================
+# 1. CONSTANTS & RATE LIMITS
+# ==========================================
+# 20 req/min = 1 request every 3 seconds. 
+# We use 3.1 to be safe against network jitter.
+API_RATE_LIMIT_DELAY = 3.1 
+
+# ==========================================
+# 2. APP CONFIG & SESSION STATE
+# ==========================================
+st.set_page_config(page_title="Typhoon Invoice AI", layout="wide")
+
+# Persistent storage for results so they don't disappear on re-run
+if "invoice_results" not in st.session_state:
+    st.session_state.invoice_results = []
+
+# --- Sidebar Configuration ---
+st.sidebar.title("⚙️ System Configuration")
+mode = st.sidebar.radio("Processing Mode", ["LOCAL (Ollama)", "API (Typhoon Cloud)"])
+
+if mode == "LOCAL (Ollama)":
+    OCR_BASE_URL = "http://localhost:11434/v1"
+    OCR_MODEL = "scb10x/typhoon-ocr1.5-3b"
+    LLM_BASE_URL = "http://localhost:11434/v1"
+    LLM_MODEL = "scb10x/typhoon2.5-qwen3-4b"
+    API_KEY = "ollama"
+    st.sidebar.info("Running locally - No rate limits applied.")
+else:
+    OCR_BASE_URL = "https://api.opentyphoon.ai/v1"
+    OCR_MODEL = "typhoon-ocr"
+    LLM_BASE_URL = "https://api.opentyphoon.ai/v1"
+    LLM_MODEL = "typhoon-v2.5-30b-a3b-instruct"
+    API_KEY = os.getenv("typhoon_api_key")
+    st.sidebar.success("Cloud API Mode - 20 req/m limit enforced.")
+
+client = OpenAI(api_key=API_KEY, base_url=LLM_BASE_URL)
+
+# Mock Database
 DATABASE_PO = {
-    "PO-2023-001": {"vendor": "บริษัท วัสดุก่อสร้าง จำกัด", "approved_amount": 10700.00, "status": "Approved"},
-    "PO-2023-002": {"vendor": "ร้านเหล็กไทย", "approved_amount": 50000.00, "status": "Approved"},
-    "IV1806-0002": {"vendor": "surebattstore", "approved_amount": 410.00, "status": "Approved"} #ตัวอย่างจริง
+    "PO-2023-001": {"vendor": "บริษัท วัสดุก่อสร้าง จำกัด", "approved_amount": 10700.00},
+    "PO-2023-002": {"vendor": "ร้านเหล็กไทย", "approved_amount": 50000.00},
+    "IV1806-0002": {"vendor": "surebattstore", "approved_amount": 410.00}
 }
 
-# --- Clean JSON ---
-# บางที LLM จะตอบมาพร้อมกับ ```json ... ``` เราต้องล้างออกก่อน
+# ==========================================
+# 3. UTILITY FUNCTIONS
+# ==========================================
 def clean_json_response(text):
     text = re.sub(r'```json', '', text)
     text = re.sub(r'```', '', text)
     return text.strip()
 
-# ==========================================
-# Step 1: OCR (Extraction - Eyes)
-# ==========================================
-input_path = r"invoice_sample.jpg"
-print("--- Scanning Document... ---")
-
-try:
-    markdown_text = ocr_document(
-        input_path,
-        base_url=llm_api,
-        api_key="ollama",
-        model=ocr_model, #typhoon-ocr1.5-3b
-        page_num=1
-    )
-    print(f'[OCR Result]: Document scanned successfully.')
-    print(f'This is markdown text \n {markdown_text}')
-except Exception as e:
-    print(f"Error during OCR: {e}")
-    markdown_text = "จำลองข้อความ: ใบแจ้งหนี้ เลขที่ INV-999 อ้างถึงใบสั่งซื้อ PO-2023-001 ยอดรวมสุทธิ 10,700.00 บาท บริษัท วัสดุก่อสร้าง จำกัด" # Fallback สำหรับเทสถ้าไม่มีไฟล์
+def safe_float_convert(value):
+    """Cleans currency strings like '1,200.50' to float."""
+    try:
+        if isinstance(value, str):
+            value = value.replace(',', '').strip()
+        return float(value)
+    except:
+        return 0.0
 
 # ==========================================
-# Step 2: Extract Structured Info (Reasoning - Brain)
+# 4. CORE PROCESSING LOGIC
 # ==========================================
-print("--- Extracting Data with LLM... ---")
+def process_single_invoice(uploaded_file):
+    """Processes a single file with built-in retry logic for Rate Limits."""
+    # Use tempfile to avoid file collision
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+        tmp.write(uploaded_file.getbuffer())
+        tmp_path = tmp.name
 
-prompt_for_llm_structure = f"""
-คุณคือผู้ช่วยฝ่ายบัญชี หน้าที่ของคุณคือดึงข้อมูลจากข้อความ OCR ของใบแจ้งหนี้ (Invoice)
-โดยให้ดึงข้อมูลดังนี้:
-1. invoice_number (เลขที่ใบแจ้งหนี้)
-2. po_reference (เลขที่ใบสั่งซื้อที่อ้างถึง มักขึ้นต้นด้วย PO)
-3. total_amount (ยอดเงินรวมสุทธิ ขอเป็นตัวเลขเท่านั้น ไม่เอาเครื่องหมายลูกน้ำ)
-4. vendor_name (ชื่อบริษัทผู้ขาย)
+    try:
+        # Step 1: OCR
+        markdown_text = ocr_document(
+            tmp_path, 
+            base_url=OCR_BASE_URL, 
+            api_key=API_KEY,
+            model=OCR_MODEL, 
+            page_num=1
+        )
 
-Text from OCR:
-{markdown_text}
-
-Return output as JSON format only. Keys: "invoice_number", "po_reference", "total_amount", "vendor_name"
-"""
-
-response = requests.post(
-    f"{llm_api}/chat/completions",
-    json={
-        "model": llm_structure_model, #typhoon2.5-qwen3-4b
-        "messages": [{"role": "user", "content": prompt_for_llm_structure}],
-        "temperature": 0,
-    }
-)
-result = response.json()
-raw_content = result["choices"][0]["message"]["content"]
-cleaned_json = clean_json_response(raw_content)
-
-try:
-    extracted_data = json.loads(cleaned_json)
-    print(f"[Extracted Data]: {json.dumps(extracted_data, indent=4, ensure_ascii=False)}")
-except json.JSONDecodeError:
-    print("Failed to parse JSON from LLM")
-    extracted_data = {}
-
-# ==========================================
-# Step 3: Verification Agent Logic (Action - Agent)
-# ==========================================
-print("\n--- Agent Verification Process ---")
-
-if extracted_data:
-    invoice_number = extracted_data.get("invoice_number") # IV1806-0002
-    invoice_amount = float(extracted_data.get("total_amount", 0)) # 410
-    
-    # 3.1 Check if invoice_number exists
-    if invoice_number in DATABASE_PO:
-        db_record = DATABASE_PO[invoice_number] #เช็คใน db ว่ามี invoice_number นี้ไหม
-        print(f"Found PO: {invoice_number} in Database.")
+        # Step 2: Extraction
+        prompt = f"Return JSON only: 'invoice_number', 'po_reference', 'total_amount', 'vendor_name'. Text: {markdown_text}"
+        response = client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=4096
+        )
         
-        # 3.2 Verify Amount (Cross-check)
-        db_amount = db_record["approved_amount"] #ดึง ยอดของ บิลนี้มา
+        raw_json = clean_json_response(response.choices[0].message.content)
+        data = json.loads(raw_json)
         
-        if invoice_amount == db_amount:
-            print(f"STATUS: PASSED | ยอดเงินตรงกัน ({invoice_amount} บาท)")
-            print(">> Action: ส่งต่อให้ฝ่ายการเงินอนุมัติจ่าย")
+        # Step 3: Verification
+        po_ref = data.get("po_reference")
+        inv_amt = safe_float_convert(data.get("total_amount", 0))
+        
+        status = "❌ FAILED"
+        if po_ref in DATABASE_PO:
+            db_po = DATABASE_PO[po_ref]
+            if abs(inv_amt - db_po["approved_amount"]) < 0.01:
+                status = "✅ PASSED"
+            else:
+                status = f"⚠️ MISMATCH (DB: {db_po['approved_amount']})"
         else:
-            print(f"STATUS: FAILED | ยอดเงินไม่ตรง (Invoice: {invoice_amount} vs PO: {db_amount})")
-            print(">> Action: แจ้งเตือนจัดซื้อให้ตรวจสอบส่วนต่าง")
+            status = "❓ PO NOT FOUND"
             
-    else:
-        print(f"STATUS: WARNING | ไม่พบเลขที่ PO: {invoice_number} ในระบบ")
-        print(">> Action: ตีกลับเอกสาร ขอให้ระบุเลข PO ที่ถูกต้อง")
-else:
-    print("Error: No data extracted.")
+        return {
+            "filename": uploaded_file.name,
+            "invoice_number": data.get("invoice_number"),
+            "po_reference": po_ref,
+            "total_amount": inv_amt,
+            "vendor_name": data.get("vendor_name"),
+            "verification_status": status,
+            "approved": False
+        }
+
+    except Exception as e:
+        # Check specifically for rate limit errors
+        err_msg = str(e)
+        if "429" in err_msg:
+            return "RATE_LIMIT_ERROR"
+        return {"filename": uploaded_file.name, "verification_status": f"Error: {err_msg}", "approved": False}
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 # ==========================================
-# Step 4: Visualization
+# 5. UI LAYOUT
 # ==========================================
-if os.path.exists(input_path):
-    ext = os.path.splitext(input_path)[1].lower()
+st.title("📑 Smart Finance Verifier (Pro)")
+st.caption(f"Engine: {LLM_MODEL} | Protection: Active")
 
-    if ext == ".pdf":
-        pages = convert_from_path(input_path, dpi=200)
-        if pages:
-            plt.figure(figsize=(8, 10))
-            plt.imshow(pages[0])
-            plt.title(f"Invoice: {extracted_data.get('invoice_number', 'Unknown')}")
-            plt.axis('off')
-            plt.show()
+files = st.file_uploader("Upload Invoices", accept_multiple_files=True, type=['png', 'jpg', 'pdf'])
 
-    elif ext in [".jpg", ".jpeg", ".png"]:
-        img = plt.imread(input_path)
-        plt.figure(figsize=(8, 10))
-        plt.imshow(img)
-        plt.axis('off')
-        plt.show()
+if files:
+    if st.button("🚀 Start Batch Processing"):
+        st.session_state.invoice_results = [] # Clear previous
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        for i, file in enumerate(files):
+            status_text.text(f"Processing {i+1}/{len(files)}: {file.name}")
+            
+            # Record start time for throttling
+            start_time = time.time()
+            
+            # Process the invoice
+            result = process_single_invoice(file)
+            
+            # Handle Retry if hit rate limit
+            if result == "RATE_LIMIT_ERROR":
+                st.warning("Hit API Limit. Cooling down for 10s...")
+                time.sleep(10)
+                result = process_single_invoice(file) # Try once more
 
+            st.session_state.invoice_results.append(result)
+            
+            # ENFORCE RATE LIMIT (Only in API Mode)
+            if mode == "API (Typhoon Cloud)":
+                elapsed = time.time() - start_time
+                if elapsed < API_RATE_LIMIT_DELAY:
+                    time.sleep(API_RATE_LIMIT_DELAY - elapsed)
+            
+            progress_bar.progress((i + 1) / len(files))
+        
+        status_text.success("Batch Processing Complete!")
 
-# Support type Images: PNG, JPEG /Documents: PDF
+# ==========================================
+# 6. HUMAN-IN-THE-LOOP & EXPORT
+# ==========================================
+if st.session_state.invoice_results:
+    st.divider()
+    st.subheader("👨‍💻 Human Review & Approval")
+    
+    df = pd.DataFrame(st.session_state.invoice_results)
+    
+    # Editable table for corrections
+    edited_df = st.data_editor(
+        df,
+        column_config={
+            "approved": st.column_config.CheckboxColumn("Approve?", default=False),
+            "total_amount": st.column_config.NumberColumn("Amount (THB)", format="%.2f"),
+            "verification_status": st.column_config.TextColumn("Status", disabled=True),
+            "filename": st.column_config.TextColumn("Source File", disabled=True),
+        },
+        hide_index=True,
+        use_container_width=True
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("💾 Finalize & Save Approved"):
+            count = len(edited_df[edited_df['approved'] == True])
+            st.balloons()
+            st.success(f"Finalized {count} invoices for payment.")
+            
+    with col2:
+        # Use utf-8-sig for Excel Thai language support
+        csv = edited_df.to_csv(index=False).encode('utf-8-sig')
+        st.download_button(
+            label="📥 Export to CSV for Excel",
+            data=csv,
+            file_name=f"finance_audit_{int(time.time())}.csv",
+            mime="text/csv"
+        )
