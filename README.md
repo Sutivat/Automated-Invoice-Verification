@@ -6,12 +6,14 @@ An intelligent, batch-processing web application designed to automate invoice ve
 
 ## 🚀 Key Features
 
-* **Dual-Mode Processing**: Seamlessly toggle between **Local (Ollama)** for privacy/cost-saving and **Cloud (OpenTyphoon API)** for high-performance agentic reasoning.
-* **Batch Multi-Upload**: Process multiple images (JPG/PNG) or PDFs simultaneously.
-* **Automated Verification**: Automatically cross-references extracted Invoice data against a Purchase Order (PO) database to check for amount mismatches or missing records.
-* **Human-in-the-Loop (HITL)**: An editable data table allows finance staff to manually correct OCR errors or override system status before finalization.
-* **Rate-Limit Protection**: Built-in "Throttling" logic (3.1s delay) and exponential backoff to comply with Typhoon OCR’s **20 req/min** limit, preventing API bans.
-* **Excel-Ready Export**: Generates CSV files with `utf-8-sig` encoding to ensure Thai characters display correctly in Microsoft Excel.
+* **Advanced 2-Way Matching**: Automatically validates invoice totals against a mock ERP database (`DATABASE_PO`) to ensure financial accuracy.
+* **Duplicate Detection**: Guards against double-billing by checking against a `PAID_INVOICES` registry.
+* **Rich Data Extraction**: Extracts granular details including **Tax ID**, **Invoice Date**, **Subtotal**, and **VAT (7%)**.
+* **Dual-Mode Processing**:
+    * **Local (Ollama)**: Uses `typhoon-ocr1.5-3b` and `typhoon2.5-4b` for high privacy.
+    * **Cloud (OpenTyphoon API)**: Uses `typhoon-v2.5-30b` for superior agentic reasoning.
+* **Human-in-the-Loop (HITL)**: A specialized AP review table with editable actions (**Approve**, **Hold**, **Reject**) and automated remarks.
+* **ERP-Ready Export**: One-click CSV export with standardized column headers (e.g., `DocDate`, `InvoiceNo`, `TaxAmount`) and `utf-8-sig` encoding for Thai character support in Excel.
 
 ---
 

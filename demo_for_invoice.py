@@ -45,13 +45,13 @@ client = OpenAI(api_key=API_KEY, base_url=LLM_BASE_URL)
 
 # Mock Database (จำลองฐานข้อมูล ERP)
 DATABASE_PO = {
-    "PO-2023-001": {"vendor": "บริษัท วัสดุก่อสร้าง จำกัด", "tax_id": "0105555555555", "approved_amount": 10700.00},
-    "PO-2023-002": {"vendor": "ร้านเหล็กไทย", "tax_id": "0104444444444", "approved_amount": 50000.00},
+    "2312/2019": {"vendor": "East Repair Inc.", "tax_id": "0105555555555", "approved_amount": 154.06},
+    "xxx-xxxx": {"vendor": "Surebatt Store", "tax_id": "0104444444444", "approved_amount": 50000.00},
     "IV1806-0002": {"vendor": "surebattstore", "tax_id": "0103333333333", "approved_amount": 410.00}
 }
 
 # จำลองฐานข้อมูลบิลที่เคยจ่ายเงินไปแล้ว (กันจ่ายซ้ำ)
-PAID_INVOICES = {"INV-0001", "INV-9999", "IV1806-0001"}
+PAID_INVOICES = {"01234", "INV-9999", "IV1806-0001"}
 
 # ==========================================
 # 3. UTILITY FUNCTIONS
