@@ -82,7 +82,7 @@ def process_single_invoice(uploaded_file):
     with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as tmp:
         tmp.write(uploaded_file.getbuffer())
         tmp_path = tmp.name
-
+    start_ocr = time.time()
     try:
         # Step 1: OCR
         markdown_text = ocr_document(
@@ -92,20 +92,23 @@ def process_single_invoice(uploaded_file):
             model=OCR_MODEL, 
             page_num=1 # ถ้าเป็น PDF จะดึงหน้าแรกมา ถ้าเป็นรูปพารามิเตอร์นี้อาจจะถูกข้ามไป
         )
-        
+        end_ocr = time.time() - start_ocr
+
         # Step 2: Extraction (เพิ่มการดึง Tax ID, Date, Subtotal, VAT)
         prompt = f"""
         Return JSON only with exact keys: 'invoice_number', 'invoice_date' (YYYY-MM-DD format), 
         'po_reference', 'tax_id', 'vendor_name', 'subtotal' (number), 'vat_amount' (number), 'total_amount' (number). 
         Text: {markdown_text}
         """
+        start_llm = time.time()
         response = client.chat.completions.create(
             model=LLM_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=4096
         )
-        
+        end_llm = time.time() - start_llm
+
         raw_json = clean_json_response(response.choices[0].message.content)
         data = json.loads(raw_json)
         
@@ -148,7 +151,9 @@ def process_single_invoice(uploaded_file):
             "vat_amount": safe_float_convert(data.get("vat_amount", 0)),
             "total_amount": inv_amt,
             "verification_status": status,
-            "remarks": remarks
+            "remarks": remarks,
+            "ocr_time_sec": round(end_ocr, 2), 
+            "llm_time_sec": round(end_llm, 2)
         }
 
     except Exception as e:
@@ -213,6 +218,8 @@ if st.session_state.invoice_results:
             "total_amount": st.column_config.NumberColumn("Total", format="%.2f"),
             "verification_status": st.column_config.TextColumn("AI Status", disabled=True),
             "filename": st.column_config.TextColumn("Source", disabled=True),
+            "ocr_time_sec": st.column_config.NumberColumn("OCR (วิ)", format="%.2f", disabled=True),
+            "llm_time_sec": st.column_config.NumberColumn("LLM (วิ)", format="%.2f", disabled=True),
         },
         hide_index=True,
         use_container_width=True
