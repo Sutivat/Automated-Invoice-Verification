@@ -73,7 +73,13 @@ def safe_float_convert(value):
 # 4. CORE PROCESSING LOGIC
 # ==========================================
 def process_single_invoice(uploaded_file):
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+    """Processes a single file with built-in retry logic for Rate Limits."""
+    
+    # 1. ดึงนามสกุลไฟล์ที่แท้จริงจากชื่อไฟล์ที่อัปโหลด (เช่น .pdf, .jpg, .png)
+    file_extension = os.path.splitext(uploaded_file.name)[1].lower()
+    
+    # 2. ใช้นามสกุลไฟล์ของจริงในการสร้าง Temp File
+    with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as tmp:
         tmp.write(uploaded_file.getbuffer())
         tmp_path = tmp.name
 
@@ -84,9 +90,9 @@ def process_single_invoice(uploaded_file):
             base_url=OCR_BASE_URL, 
             api_key=API_KEY,
             model=OCR_MODEL, 
-            page_num=1
+            page_num=1 # ถ้าเป็น PDF จะดึงหน้าแรกมา ถ้าเป็นรูปพารามิเตอร์นี้อาจจะถูกข้ามไป
         )
-
+        
         # Step 2: Extraction (เพิ่มการดึง Tax ID, Date, Subtotal, VAT)
         prompt = f"""
         Return JSON only with exact keys: 'invoice_number', 'invoice_date' (YYYY-MM-DD format), 
